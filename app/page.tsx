@@ -103,6 +103,7 @@ export default function AISandboxPage() {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const chatMessagesRef = useRef<HTMLDivElement>(null);
   const codeDisplayRef = useRef<HTMLDivElement>(null);
+  const screenshotInputRef = useRef<HTMLInputElement>(null);
   
   const [codeApplicationState, setCodeApplicationState] = useState<CodeApplicationState>({
     stage: null
@@ -2334,6 +2335,150 @@ Focus on the key sections and content, making it clean and modern while preservi
     }
   };
 
+  const generateWithPrompt = async (prompt: string) => {
+    setGenerationProgress(prev => ({
+      isGenerating: true,
+      status: 'Initializing AI...',
+      components: [],
+      currentComponent: 0,
+      streamedCode: '',
+      isStreaming: true,
+      isThinking: false,
+      thinkingText: undefined,
+      thinkingDuration: undefined,
+      files: prev.files || [],
+      currentFile: undefined,
+      lastProcessedPosition: 0
+    }));
+
+    const aiResponse = await fetch('/api/generate-ai-code-stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        prompt,
+        model: aiModel,
+        context: {
+          sandboxId: sandboxData?.sandboxId,
+          structure: structureContent,
+          conversationContext: conversationContext
+        }
+      })
+    });
+
+    if (!aiResponse.ok || !aiResponse.body) {
+      throw new Error('Failed to generate code');
+    }
+
+    const reader = aiResponse.body.getReader();
+    const decoder = new TextDecoder();
+    let generatedCode = '';
+    let explanation = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      const chunk = decoder.decode(value);
+      const lines = chunk.split('\n');
+
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          try {
+            const data = JSON.parse(line.slice(6));
+
+            if (data.type === 'status') {
+              setGenerationProgress(prev => ({ ...prev, status: data.message }));
+            } else if (data.type === 'code') {
+              generatedCode += data.code;
+              setGenerationProgress(prev => ({ ...prev, streamedCode: generatedCode }));
+            } else if (data.type === 'explanation') {
+              explanation += data.message;
+              setGenerationProgress(prev => ({ ...prev, explanation }));
+            } else if (data.type === 'file') {
+              setGenerationProgress(prev => ({
+                ...prev,
+                files: [...(prev.files || []), { path: data.path, content: data.content, type: data.fileType, completed: true }],
+                currentFile: { path: data.path, content: data.content, type: data.fileType }
+              }));
+            } else if (data.type === 'thinking') {
+              setGenerationProgress(prev => ({
+                ...prev,
+                isThinking: true,
+                thinkingText: data.message,
+                thinkingDuration: data.duration
+              }));
+            } else if (data.type === 'endThinking') {
+              setGenerationProgress(prev => ({
+                ...prev,
+                isThinking: false,
+                thinkingText: undefined,
+                thinkingDuration: undefined
+              }));
+            } else if (data.type === 'done') {
+              setGenerationProgress(prev => ({
+                ...prev,
+                isGenerating: false,
+                isStreaming: false,
+                status: 'Generation complete!'
+              }));
+              if (explanation) {
+                addChatMessage(explanation, 'ai');
+              }
+            }
+          } catch (error) {
+            console.error('Error parsing stream data:', error);
+          }
+        }
+      }
+    }
+  };
+
+  const generateFromScreenshot = async (base64: string) => {
+    try {
+      setChatMessages([]);
+      addChatMessage('Starting to build from uploaded screenshot...', 'system');
+
+      const sandboxPromise = !sandboxData ? createSandbox(true) : Promise.resolve();
+
+      setLoadingStage('gathering');
+      setActiveTab('preview');
+      setUrlScreenshot(base64);
+      setIsPreparingDesign(true);
+      setShowHomeScreen(false);
+
+      await sandboxPromise;
+
+      const prompt = `I want to recreate the website shown in the screenshot below as a complete React application.\n\nSCREENSHOT (base64):\n${base64}\n\n${homeContextInput ? `ADDITIONAL CONTEXT/REQUIREMENTS FROM USER:\n${homeContextInput}\n\nPlease incorporate these requirements into the design and implementation.` : ''}\n\nIMPORTANT INSTRUCTIONS:\n- Create a COMPLETE, working React application\n- Use Tailwind CSS for all styling (no custom CSS files)\n- Make it responsive and modern\n- Ensure the app actually renders visible content\n- Create proper component structure`;
+
+      setIsPreparingDesign(false);
+      setUrlScreenshot(null);
+      setTargetUrl('');
+      setLoadingStage('planning');
+      setTimeout(() => {
+        setLoadingStage('generating');
+        setActiveTab('generation');
+      }, 1500);
+
+      await generateWithPrompt(prompt);
+    } catch (error: any) {
+      console.error('Failed to generate from screenshot:', error);
+      addChatMessage(`Failed to generate from screenshot: ${error.message}`, 'system');
+      setIsPreparingDesign(false);
+      setUrlScreenshot(null);
+      setTargetUrl('');
+      setLoadingStage(null);
+    }
+  };
+
+  const handleScreenshotUpload = async (file: File) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const base64 = reader.result as string;
+      generateFromScreenshot(base64);
+    };
+    reader.readAsDataURL(file);
+  };
+
   const handleHomeScreenSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!homeUrlInput.trim()) return;
@@ -2955,7 +3100,30 @@ Focus on the key sections and content, making it clean and modern.`;
                     </div>
                   )}
               </form>
-              
+
+              <div className="mt-4 text-center">
+                <input
+                  type="file"
+                  accept="image/*"
+                  ref={screenshotInputRef}
+                  className="hidden"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) {
+                      handleScreenshotUpload(file);
+                      e.target.value = '';
+                    }
+                  }}
+                />
+                <button
+                  type="button"
+                  onClick={() => screenshotInputRef.current?.click()}
+                  className="text-sm text-zinc-600 hover:text-zinc-800 underline"
+                >
+                  Upload Screenshot
+                </button>
+              </div>
+
               {/* Model Selector */}
               <div className="mt-6 flex items-center justify-center animate-[fadeIn_1s_ease-out]">
                 <select
